@@ -1,0 +1,32 @@
+{
+  "name": "pi-xai-grok-oauth",
+  "version": "0.1.0",
+  "description": "xAI Grok OAuth provider for pi (SuperGrok / Premium subscription support)",
+  "keywords": [
+    "pi-package",
+    "xai",
+    "grok",
+    "oauth",
+    "xai-oauth",
+    "grok-oauth"
+  ],
+  "type": "module",
+  "main": "index.ts",
+  "pi": {
+    "extensions": ["./index.ts"]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-ai": "*"
+  },
+  "author": "David Perez",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/perezdap/pi-xai-grok-oauth.git"
+  },
+  "bugs": {
+    "url": "https://github.com/perezdap/pi-xai-grok-oauth/issues"
+  },
+  "homepage": "https://github.com/perezdap/pi-xai-grok-oauth#readme"
+}
