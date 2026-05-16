@@ -391,18 +391,51 @@ function grokSupportsReasoningEffort(modelId: string): boolean {
 
 function sanitizeXaiResponsesPayload(params: any, model: Model<Api>): any {
 	const next = { ...params };
+	let hasStrippedImages = false;
 
 	// xAI's Responses surface rejects replayed encrypted reasoning items and
 	// should not be asked to return them. Grok still reasons natively; only a
 	// small allowlist accepts the effort dial.
+	// Additionally, xAI does not support `input_image` in the Responses API
+	// format — it causes 422 "ModelInput" deserialization errors.
 	if (Array.isArray(next.input)) {
-		next.input = next.input.filter((item: any) => {
-			if (!item || typeof item !== "object") return true;
-			if (item.type === "reasoning") return false;
-			if ((item.type === "message" || item.role) && Array.isArray(item.content) && item.content.length === 0) return false;
-			if ((item.type === "message" || item.role) && typeof item.content === "string" && item.content.length === 0) return false;
-			return true;
-		});
+		next.input = next.input.map((item: any) => {
+			if (!item || typeof item !== "object") return item;
+
+			// Strip reasoning items
+			if (item.type === "reasoning") return null;
+
+			// Handle user/assistant messages with a content array
+			if (Array.isArray(item.content)) {
+				const sanitizedContent = item.content
+					.map((part: any) => {
+						if (!part || typeof part !== "object") return part;
+						if (part.type === "input_image" || part.type === "image_url") {
+							hasStrippedImages = true;
+							return {
+								type: "input_text",
+								text: "[Image input omitted — xAI Responses API does not support image uploads]",
+							};
+						}
+						return part;
+					})
+					.filter(Boolean);
+
+				// Drop empty content arrays entirely
+				if (sanitizedContent.length === 0) return null;
+
+				return { ...item, content: sanitizedContent };
+			}
+
+			// Strip empty string content
+			if (typeof item.content === "string" && item.content.length === 0) return null;
+
+			return item;
+		}).filter(Boolean);
+	}
+
+	if (hasStrippedImages) {
+		console.warn("[xai-grok-oauth] Images were stripped from the request because xAI's Responses API does not support them.");
 	}
 
 	if (grokSupportsReasoningEffort(model.id)) {
