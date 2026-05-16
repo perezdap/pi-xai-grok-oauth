@@ -1,5 +1,9 @@
 # pi-xai-grok-oauth
 
+[![CI](https://github.com/perezdap/pi-xai-grok-oauth/actions/workflows/ci.yml/badge.svg)](https://github.com/perezdap/pi-xai-grok-oauth/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![pi Package](https://img.shields.io/badge/pi-package-5865F2)](https://pi.dev)
+
 Official xAI Grok OAuth provider for [pi](https://pi.dev) — brings SuperGrok / Premium subscription access (including Grok Build) directly into pi via the official xAI OAuth flow.
 
 Based on the battle-tested `xai-oauth` implementation from the Hermes agent.
@@ -137,3 +141,34 @@ MIT
 - xAI for the excellent Grok models and OAuth surface
 - The Hermes agent team for the original `xai-oauth` flow and hard-won knowledge about the Responses API quirks
 - The pi team for the beautiful extension system
+
+## Contributing
+
+We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for setup instructions, development workflow, and how to submit pull requests.
+
+## Development
+
+This project uses TypeScript with a strict `tsconfig.json`. After making changes:
+
+```bash
+npm install
+npx tsc --noEmit   # Type check
+pi -e .              # Test in pi
+```
+
+## Releasing
+
+We use automated releases:
+
+1. Update version in `package.json`
+2. Commit and push a tag: `git tag v1.0.0 && git push --tags`
+3. The Release workflow will automatically:
+   - Run CI
+   - Publish to npm
+   - Create a GitHub Release with auto-generated notes
+
+See `.github/workflows/release.yml` for details.
+
+## License
+
+MIT
