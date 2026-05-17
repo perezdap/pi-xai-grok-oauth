@@ -100,11 +100,21 @@ const DEFAULT_MODELS: XaiModel[] = [
 	},
 ];
 
+let liveModelsCache: XaiModel[] | null = null;
+let liveModelsCacheToken: string | undefined;
+let liveModelsRefreshPromise: Promise<{ models: XaiModel[]; live: boolean }> | null = null;
+let lastXaiCredentials: XaiOAuthCredentials | undefined;
+
+function getXaiAccessToken(credentials?: XaiOAuthCredentials): string {
+	return credentials?.access || process.env.XAI_OAUTH_TOKEN || process.env.PI_XAI_OAUTH_TOKEN || "";
+}
+
 function configuredModels(): XaiModel[] {
 	const configured = (process.env.PI_XAI_OAUTH_MODELS || "")
 		.split(",")
 		.map((m) => m.trim())
 		.filter(Boolean);
+
 	if (configured.length === 0) return DEFAULT_MODELS;
 
 	const byId = new Map(DEFAULT_MODELS.map((m) => [m.id, m]));
@@ -117,6 +127,32 @@ function configuredModels(): XaiModel[] {
 		contextWindow: 1_000_000,
 		maxTokens: 30_000,
 	});
+}
+
+function activeModels(): XaiModel[] {
+	return liveModelsCache ?? configuredModels();
+}
+
+function toProviderModelConfig(model: XaiModel) {
+	return {
+		id: model.id,
+		name: model.name,
+		reasoning: model.reasoning,
+		thinkingLevelMap: model.thinkingLevelMap,
+		input: model.input,
+		cost: model.cost,
+		contextWindow: model.contextWindow,
+		maxTokens: model.maxTokens,
+	};
+}
+
+function toRuntimeModel(model: XaiModel, baseUrl: string): Model<Api> {
+	return {
+		...toProviderModelConfig(model),
+		provider: "xai-oauth",
+		api: "xai-oauth-responses",
+		baseUrl,
+	};
 }
 
 function base64Url(buffer: Buffer): string {
@@ -366,6 +402,7 @@ async function loginXai(callbacks: OAuthLoginCallbacks): Promise<OAuthCredential
 
 		const credentials = await exchangeCodeForTokens(discovery.token_endpoint, result.code, callback.redirectUri, verifier);
 		credentials.discovery = discovery;
+		await refreshLiveModelCache(credentials, { force: true });
 		return credentials;
 	} finally {
 		callback.server.close();
@@ -392,7 +429,7 @@ async function refreshXaiToken(credentials: OAuthCredentials): Promise<OAuthCred
 	if (!access) throw new Error("xAI token refresh did not return access_token.");
 	const refresh = String(payload.refresh_token || credentials.refresh);
 	const expiresIn = typeof payload.expires_in === "number" ? payload.expires_in : Number(payload.expires_in || 3600);
-	return {
+	const refreshed: XaiOAuthCredentials = {
 		...xaiCredentials,
 		access,
 		refresh,
@@ -402,10 +439,111 @@ async function refreshXaiToken(credentials: OAuthCredentials): Promise<OAuthCred
 		tokenType: String(payload.token_type || xaiCredentials.tokenType || "Bearer"),
 		baseUrl: getXaiBaseUrl(),
 	};
+	await refreshLiveModelCache(refreshed, { force: true });
+	return refreshed;
 }
 
 function getXaiBaseUrl(): string {
 	return (process.env.PI_XAI_BASE_URL || process.env.XAI_BASE_URL || DEFAULT_XAI_BASE_URL).replace(/\/+$/, "");
+}
+
+async function fetchLiveXaiModels(credentials?: XaiOAuthCredentials): Promise<XaiModel[]> {
+	const token = getXaiAccessToken(credentials);
+	if (!token) throw new Error("No xAI access token available.");
+
+	const baseUrl = credentials?.baseUrl || getXaiBaseUrl();
+	const response = await fetch(`${baseUrl}/models`, {
+		headers: {
+			Authorization: `Bearer ${token}`,
+			Accept: "application/json",
+		},
+	});
+
+	if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+	const data = await response.json() as { data?: unknown };
+	const rows = Array.isArray(data.data) ? data.data : [];
+
+	const liveModels = rows
+		.filter((m: any) => m.id && String(m.id).toLowerCase().includes("grok"))
+		.sort((a: any, b: any) => String(a.id).localeCompare(String(b.id)));
+
+	if (liveModels.length === 0) throw new Error("xAI /models returned no Grok models.");
+
+	return liveModels.map((m: any) => {
+		const id = String(m.id);
+		const isMultiAgent = id.includes("multi-agent");
+		const isNonReasoning = id.includes("non-reasoning");
+		const isBuild = id.includes("build");
+		const is43 = id.includes("4.3");
+
+		return {
+			id,
+			name: id.replace(/-/g, " ").replace(/\b\w/g, (c: string) => c.toUpperCase()),
+			reasoning: !isNonReasoning,
+			input: ["text"] as const,
+			cost: isBuild ? GROK_BUILD_COST : is43 ? GROK_43_COST : GROK_420_COST,
+			contextWindow: (id.includes("4.20") || isMultiAgent) ? 2_000_000 : 1_000_000,
+			maxTokens: 32_000,
+			thinkingLevelMap: isNonReasoning ? {
+				off: "none",
+				minimal: null,
+				low: null,
+				medium: null,
+				high: null,
+				xhigh: null,
+			} : undefined,
+		};
+	});
+}
+
+async function refreshLiveModelCache(
+	credentials?: XaiOAuthCredentials,
+	options: { force?: boolean } = {},
+): Promise<{ models: XaiModel[]; live: boolean; error?: unknown }> {
+	if (credentials) lastXaiCredentials = credentials;
+	const effectiveCredentials = credentials ?? lastXaiCredentials;
+	const token = getXaiAccessToken(effectiveCredentials);
+
+	if (!token) {
+		return { models: activeModels(), live: false, error: new Error("No xAI access token available.") };
+	}
+
+	if (!options.force && liveModelsCache && liveModelsCacheToken === token) {
+		return { models: liveModelsCache, live: true };
+	}
+
+	try {
+		const models = await fetchLiveXaiModels(effectiveCredentials);
+		liveModelsCache = models;
+		liveModelsCacheToken = token;
+		return { models, live: true };
+	} catch (err: any) {
+		console.warn("[pi-xai-grok-oauth] Failed to fetch live models; keeping cached/configured models:", err.message || err);
+		return { models: activeModels(), live: false, error: err };
+	}
+}
+
+function refreshLiveModelCacheInBackground(credentials?: XaiOAuthCredentials, onRefresh?: (models: XaiModel[]) => void): void {
+	if (credentials) lastXaiCredentials = credentials;
+	const effectiveCredentials = credentials ?? lastXaiCredentials;
+	const token = getXaiAccessToken(effectiveCredentials);
+	if (!token || (liveModelsCache && liveModelsCacheToken === token)) return;
+
+	liveModelsRefreshPromise ??= refreshLiveModelCache(effectiveCredentials).finally(() => {
+		liveModelsRefreshPromise = null;
+	});
+	void liveModelsRefreshPromise.then((result) => {
+		if (result.live) onRefresh?.(result.models);
+	});
+}
+
+/**
+ * Dynamically fetch the exact list of models available on this xAI account.
+ * Falls back to cached/configured defaults when live discovery is unavailable.
+ */
+export async function listLiveXaiModels(credentials?: XaiOAuthCredentials): Promise<XaiModel[]> {
+	return (await refreshLiveModelCache(credentials, { force: true })).models;
 }
 
 const GROK_EFFORT_CAPABLE_PREFIXES = ["grok-3-mini", "grok-4.20-multi-agent", "grok-4.3"];
@@ -511,32 +649,87 @@ function streamXaiOAuth(model: Model<Api>, context: Context, options?: SimpleStr
 }
 
 export default function (pi: ExtensionAPI) {
-	pi.registerProvider("xai-oauth", {
-		name: "xAI Grok OAuth (SuperGrok Subscription)",
-		baseUrl: getXaiBaseUrl(),
-		apiKey: "XAI_OAUTH_TOKEN",
-		api: "xai-oauth-responses",
-		models: configuredModels().map((m) => ({
-			id: m.id,
-			name: m.name,
-			reasoning: m.reasoning,
-			thinkingLevelMap: m.thinkingLevelMap,
-			input: m.input,
-			cost: m.cost,
-			contextWindow: m.contextWindow,
-			maxTokens: m.maxTokens,
-		})),
-		oauth: {
+	const registerXaiProvider = (models: XaiModel[] = activeModels()) => {
+		pi.registerProvider("xai-oauth", {
 			name: "xAI Grok OAuth (SuperGrok Subscription)",
-			usesCallbackServer: true,
-			login: loginXai,
-			refreshToken: refreshXaiToken,
-			getApiKey: (credentials: OAuthCredentials) => credentials.access,
-			modifyModels: (models: Model<Api>[], credentials: OAuthCredentials) => {
-				const baseUrl = String((credentials as XaiOAuthCredentials).baseUrl || getXaiBaseUrl()).replace(/\/+$/, "");
-				return models.map((m: Model<Api>) => m.provider === "xai-oauth" ? { ...m, baseUrl } : m);
-			},
-		} as any,
-		streamSimple: streamXaiOAuth,
+			baseUrl: getXaiBaseUrl(),
+			apiKey: "XAI_OAUTH_TOKEN",
+			api: "xai-oauth-responses",
+			models: models.map(toProviderModelConfig),
+			oauth: {
+				name: "xAI Grok OAuth (SuperGrok Subscription)",
+				usesCallbackServer: true,
+				login: async (callbacks: OAuthLoginCallbacks) => {
+					const credentials = await loginXai(callbacks) as XaiOAuthCredentials;
+					registerXaiProvider(activeModels());
+					return credentials;
+				},
+				refreshToken: async (credentials: OAuthCredentials) => {
+					const refreshed = await refreshXaiToken(credentials) as XaiOAuthCredentials;
+					registerXaiProvider(activeModels());
+					return refreshed;
+				},
+				getApiKey: (credentials: OAuthCredentials) => credentials.access,
+				modifyModels: (allModels: Model<Api>[], credentials: OAuthCredentials) => {
+					const xaiCreds = credentials as XaiOAuthCredentials;
+					lastXaiCredentials = xaiCreds;
+					refreshLiveModelCacheInBackground(xaiCreds, (freshModels) => registerXaiProvider(freshModels));
+
+					const baseUrl = String(xaiCreds.baseUrl || getXaiBaseUrl()).replace(/\/+$/, "");
+					const source = activeModels();
+					const liveById = new Map(source.map((m) => [m.id, m]));
+					const existingXaiIds = new Set(allModels.filter((m) => m.provider === "xai-oauth").map((m) => m.id));
+
+					const updated = allModels.map((m: Model<Api>) => {
+						if (m.provider !== "xai-oauth") return m;
+						const live = liveById.get(m.id);
+						if (!live) return { ...m, baseUrl };
+						return {
+							...m,
+							name: live.name,
+							reasoning: live.reasoning,
+							thinkingLevelMap: live.thinkingLevelMap,
+							input: live.input,
+							cost: live.cost,
+							contextWindow: live.contextWindow,
+							maxTokens: live.maxTokens,
+							baseUrl,
+						};
+					});
+
+					const additions = source
+						.filter((m) => !existingXaiIds.has(m.id))
+						.map((m) => toRuntimeModel(m, baseUrl));
+
+					return [...updated, ...additions];
+				},
+			} as any,
+			streamSimple: streamXaiOAuth,
+		});
+	};
+
+	registerXaiProvider();
+
+	pi.registerCommand("xai-models", {
+		description: "Show and refresh the Grok models currently available on your xAI account",
+		handler: async (_args, ctx) => {
+			const result = await refreshLiveModelCache(lastXaiCredentials, { force: true });
+			registerXaiProvider(result.models);
+
+			console.log(result.live ? "\n=== Live xAI Grok Models ===" : "\n=== xAI Grok Models (cached/configured fallback) ===");
+			console.table(result.models.map((m) => ({
+				id: m.id,
+				name: m.name,
+				reasoning: m.reasoning,
+				contextWindow: m.contextWindow,
+				maxTokens: m.maxTokens,
+			})));
+
+			if (result.live) {
+				ctx.ui.notify(`Found ${result.models.length} live Grok model(s). The model picker has been updated.`, "info");
+			} else {
+				ctx.ui.notify("Could not fetch live models. Using cached/configured models; run /login xai-oauth if needed.", "warning");
+			}
+		},
 	});
 }

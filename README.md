@@ -65,6 +65,15 @@ Or place it in your global extensions folder and use `/reload`.
 
    Or cycle with `Ctrl+P`.
 
+**Dynamic Model Discovery (new)**
+
+The extension now queries xAI's `/v1/models` endpoint **live** after you log in. The model picker and `/xai-models` command are refreshed from discovered model IDs; reasoning support, cost estimates, thinking level mapping, and context windows are derived from those IDs with safe fallbacks.
+
+```text
+/xai-models          # See live list + refresh model picker
+/model xai-oauth/grok-4.20-multi-agent-0309
+```
+
 ## Available Models (default)
 
 | Model ID                        | Name                        | Reasoning | Notes                          |

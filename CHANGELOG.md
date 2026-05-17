@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Dynamic model discovery**: `/xai-models` command and automatic live fetching from xAI `/v1/models`
+- Model picker and `/xai-models` refresh from live API data after login; reasoning flags, cost estimates, thinking level maps, and context windows are derived from discovered model IDs
+- `modifyModels` now triggers a guarded background live refresh (auto-updates after `/login xai-oauth` and with persisted credentials)
+- Rich mapping for `grok-4.20-multi-agent-0309` and future variants
+- Falls back gracefully to hardcoded defaults when not logged in
+
+### Added (previous)
 - Initial public release of `pi-xai-grok-oauth`
 - Full xAI Grok OAuth (SuperGrok) support for pi
 - Models: grok-build, grok-4.3, grok-4.20-*, etc.
