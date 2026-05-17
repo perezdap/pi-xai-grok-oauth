@@ -485,10 +485,10 @@ export default function (pi: ExtensionAPI) {
 			usesCallbackServer: true,
 			login: loginXai,
 			refreshToken: refreshXaiToken,
-			getApiKey: (credentials) => credentials.access,
-			modifyModels: (models, credentials) => {
+			getApiKey: (credentials: OAuthCredentials) => credentials.access,
+			modifyModels: (models: Model<Api>[], credentials: OAuthCredentials) => {
 				const baseUrl = String((credentials as XaiOAuthCredentials).baseUrl || getXaiBaseUrl()).replace(/\/+$/, "");
-				return models.map((m) => m.provider === "xai-oauth" ? { ...m, baseUrl } : m);
+				return models.map((m: Model<Api>) => m.provider === "xai-oauth" ? { ...m, baseUrl } : m);
 			},
 		} as any,
 		streamSimple: streamXaiOAuth,

@@ -10,11 +10,7 @@
     "resolveJsonModule": true,
     "noEmit": true,
     "isolatedModules": true,
-    "verbatimModuleSyntax": true,
-    "baseUrl": ".",
-    "paths": {
-      "@/*": ["./*"]
-    }
+    "verbatimModuleSyntax": true
   },
   "include": ["**/*.ts"],
   "exclude": ["node_modules", "dist", ".git"]
