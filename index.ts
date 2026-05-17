@@ -11,6 +11,7 @@ import {
 } from "@earendil-works/pi-ai";
 import { createHash, randomBytes } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { exec } from "node:child_process";
 
 const DEFAULT_XAI_BASE_URL = "https://api.x.ai/v1";
 const XAI_OAUTH_ISSUER = "https://auth.x.ai";
@@ -39,7 +40,7 @@ type XaiModel = {
 	id: string;
 	name: string;
 	reasoning: boolean;
-	input: ("text" | "image")[];
+	input: ("text")[];
 	cost: { input: number; output: number; cacheRead: number; cacheWrite: number };
 	contextWindow: number;
 	maxTokens: number;
@@ -55,7 +56,7 @@ const DEFAULT_MODELS: XaiModel[] = [
 		id: "grok-build",
 		name: "Grok Build",
 		reasoning: true,
-		input: ["text", "image"],
+		input: ["text"],
 		cost: GROK_BUILD_COST,
 		contextWindow: 1_000_000,
 		maxTokens: 30_000,
@@ -64,7 +65,7 @@ const DEFAULT_MODELS: XaiModel[] = [
 		id: "grok-4.3",
 		name: "Grok 4.3",
 		reasoning: true,
-		input: ["text", "image"],
+		input: ["text"],
 		cost: GROK_43_COST,
 		contextWindow: 1_000_000,
 		maxTokens: 30_000,
@@ -73,7 +74,7 @@ const DEFAULT_MODELS: XaiModel[] = [
 		id: "grok-4.20-0309-reasoning",
 		name: "Grok 4.20 Reasoning",
 		reasoning: true,
-		input: ["text", "image"],
+		input: ["text"],
 		cost: GROK_420_COST,
 		contextWindow: 2_000_000,
 		maxTokens: 30_000,
@@ -82,7 +83,7 @@ const DEFAULT_MODELS: XaiModel[] = [
 		id: "grok-4.20-0309-non-reasoning",
 		name: "Grok 4.20 Non-Reasoning",
 		reasoning: false,
-		input: ["text", "image"],
+		input: ["text"],
 		cost: GROK_420_COST,
 		contextWindow: 2_000_000,
 		maxTokens: 30_000,
@@ -92,7 +93,7 @@ const DEFAULT_MODELS: XaiModel[] = [
 		id: "grok-4.20-multi-agent-0309",
 		name: "Grok 4.20 Multi-Agent",
 		reasoning: true,
-		input: ["text", "image"],
+		input: ["text"],
 		cost: GROK_420_COST,
 		contextWindow: 2_000_000,
 		maxTokens: 30_000,
@@ -301,6 +302,31 @@ async function exchangeCodeForTokens(tokenEndpoint: string, code: string, redire
 	};
 }
 
+/**
+ * Robustly open a URL in the default browser.
+ * Handles Windows quoting issues that prevent `start "url"` from working.
+ */
+function openBrowser(url: string): void {
+	let command: string;
+	switch (process.platform) {
+		case "darwin":
+			command = `open "${url}"`;
+			break;
+		case "win32":
+			// Empty title ("") prevents the URL from being treated as the window title
+			command = `cmd.exe /c start "" "${url.replace(/"/g, '\\"')}"`;
+			break;
+		default:
+			command = `xdg-open "${url}"`;
+			break;
+	}
+	exec(command, (error) => {
+		if (error) {
+			console.warn(`[pi-xai-grok-oauth] Auto-open browser failed: ${error.message}. Please open the URL manually.`);
+		}
+	});
+}
+
 async function loginXai(callbacks: OAuthLoginCallbacks): Promise<OAuthCredentials> {
 	const discovery = await discoverXaiOAuth();
 	const { verifier, challenge } = generatePKCE();
@@ -321,6 +347,7 @@ async function loginXai(callbacks: OAuthLoginCallbacks): Promise<OAuthCredential
 		authUrl.searchParams.set("plan", "generic");
 		authUrl.searchParams.set("referrer", "pi-xai-grok-oauth");
 
+		openBrowser(authUrl.toString());
 		callbacks.onAuth({
 			url: authUrl.toString(),
 			instructions: `Authorize xAI, then return to pi. Callback listener: ${callback.redirectUri}`,
@@ -396,8 +423,9 @@ function sanitizeXaiResponsesPayload(params: any, model: Model<Api>): any {
 	// xAI's Responses surface rejects replayed encrypted reasoning items and
 	// should not be asked to return them. Grok still reasons natively; only a
 	// small allowlist accepts the effort dial.
-	// Additionally, xAI does not support `input_image` in the Responses API
-	// format — it causes 422 "ModelInput" deserialization errors.
+	// xAI Responses API currently rejects image inputs (causes 422 ModelInput errors).
+	// Models declare only text input so pi never sends images, but we keep a
+	// defensive stripper as a safety net.
 	if (Array.isArray(next.input)) {
 		next.input = next.input.map((item: any) => {
 			if (!item || typeof item !== "object") return item;
@@ -405,12 +433,30 @@ function sanitizeXaiResponsesPayload(params: any, model: Model<Api>): any {
 			// Strip reasoning items
 			if (item.type === "reasoning") return null;
 
+			// Catch items that are themselves image containers (e.g. standalone image messages or read results)
+			if (item.type === "image" || item.image || item.source?.type === "base64" || (item.url && String(item.url).startsWith("data:image"))) {
+				hasStrippedImages = true;
+				return {
+					type: "input_text",
+					text: "[Image input omitted — xAI Responses API does not support image uploads]",
+				};
+			}
+
 			// Handle user/assistant messages with a content array
 			if (Array.isArray(item.content)) {
 				const sanitizedContent = item.content
 					.map((part: any) => {
 						if (!part || typeof part !== "object") return part;
-						if (part.type === "input_image" || part.type === "image_url") {
+						const t = part.type;
+						if (t === "input_image" || t === "image_url" || t === "image" || (t && String(t).includes("image"))) {
+							hasStrippedImages = true;
+							return {
+								type: "input_text",
+								text: "[Image input omitted — xAI Responses API does not support image uploads]",
+							};
+						}
+						// Catch other image representations (e.g. clipboard reads, data URLs, file refs)
+						if (part.image || part.image_url || part.source?.type === "base64" || (typeof part.text === "string" && part.text.startsWith("data:image"))) {
 							hasStrippedImages = true;
 							return {
 								type: "input_text",

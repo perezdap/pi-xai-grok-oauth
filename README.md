@@ -115,6 +115,10 @@ This extension automatically strips the `reasoning` parameter for models that do
 
 This was a known issue with replaying reasoning items on follow-up turns. The extension now correctly filters these out for xAI's Responses endpoint. Start a fresh chat after updating.
 
+### Images / vision not supported
+
+All Grok models via this extension declare `input: ["text"]` only. Pasting or attaching images is disabled (xAI's current Responses API surface returns 422 ModelInput deserialization errors on image payloads). The previous sanitization layer has been kept as a safety net.
+
 ### Login fails or callback never arrives
 
 - Check that port 56121 is free
