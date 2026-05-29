@@ -509,6 +509,11 @@ async function refreshLiveModelCache(
 		return { models: activeModels(), live: false, error: new Error("No xAI access token available.") };
 	}
 
+	// Skip live fetch if token is expired — pi core will refresh before actual API calls
+	if (effectiveCredentials?.expires && Date.now() > effectiveCredentials.expires) {
+		return { models: activeModels(), live: false };
+	}
+
 	if (!options.force && liveModelsCache && liveModelsCacheToken === token) {
 		return { models: liveModelsCache, live: true };
 	}
@@ -519,7 +524,18 @@ async function refreshLiveModelCache(
 		liveModelsCacheToken = token;
 		return { models, live: true };
 	} catch (err: any) {
-		console.warn("[pi-xai-grok-oauth] Failed to fetch live models; keeping cached/configured models:", err.message || err);
+		const msg = err.message || String(err);
+		const isAuthError = /\b(401|403)\b/.test(msg);
+		// Auth errors usually mean the token is expired or lacks /models scope.
+		// pi's core will refresh the token before chat API calls, so don't warn here.
+		if (!isAuthError) {
+			console.warn("[pi-xai-grok-oauth] Failed to fetch live models; keeping cached/configured models:", msg);
+		}
+		// Clear stale cache on auth errors so we retry fresh after the next login/refresh
+		if (isAuthError) {
+			liveModelsCache = null;
+			liveModelsCacheToken = undefined;
+		}
 		return { models: activeModels(), live: false, error: err };
 	}
 }
